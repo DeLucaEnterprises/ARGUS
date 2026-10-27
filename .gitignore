@@ -1,0 +1,6 @@
+.venv/
+.env
+data/input/
+data/tiles/
+data/output/
+__pycache__/
