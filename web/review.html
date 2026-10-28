@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>ARGUS — Run / Map / Review</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+  <style>
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;margin:0;color:#1a1a1a}
+    header{background:#111;color:#fff;padding:14px 20px}
+    header h1{margin:0;font-size:20px;letter-spacing:.14em}
+    header h1 span{color:#f5a623}
+    header p{margin:4px 0 0;color:#ccc;font-size:13px}
+    main{padding:16px 20px 40px;max-width:1100px;margin:0 auto}
+    section{margin-bottom:28px}
+    h2{border-bottom:2px solid #f5a623;padding-bottom:6px}
+    #map{height:420px;border:1px solid #ccc;border-radius:8px}
+    button{cursor:pointer;padding:8px 14px;border-radius:6px;border:1px solid #999;background:#fff;font-size:14px}
+    button.primary{background:#f5a623;border-color:#d98a00;font-weight:700}
+    button.accept{background:#1e7d32;color:#fff;border-color:#1e7d32}
+    button.reject{background:#b3261e;color:#fff;border-color:#b3261e}
+    button:disabled{opacity:.5;cursor:default}
+    #runlog{background:#111;color:#ddd;padding:12px;border-radius:8px;white-space:pre-wrap;
+      font-family:Consolas,monospace;font-size:12px;max-height:260px;overflow:auto;margin-top:10px}
+    .filters button.on{background:#111;color:#fff}
+    .card{border:1px solid #ccc;border-radius:8px;padding:12px;margin:12px 0;display:flex;gap:14px;flex-wrap:wrap}
+    .card img{width:220px;max-width:100%;border-radius:6px;border:1px solid #ddd}
+    .card .body{flex:1;min-width:240px}
+    .score{font-size:22px;font-weight:800}
+    .score.high{color:#1e7d32}.score.mid{color:#b26a00}.score.low{color:#b3261e}
+    .meta{color:#555;font-size:13px}
+    .decision{font-weight:700}
+    .decision.accept{color:#1e7d32}.decision.reject{color:#b3261e}
+    .empty{color:#666}
+    a{color:#0b5cad}
+  </style>
+</head>
+<body>
+<header>
+  <h1>ARGUS <span>// Run · Map · Review</span></h1>
+  <p>Detection, never identification. No facial recognition. AI ranks; humans verify. AI never calls a find.</p>
+</header>
+<main>
+  <p id="status" class="meta">Loading…</p>
+
+  <section>
+    <h2>1 · Run</h2>
+    <p>Runs the same pipeline as Days 1–4 — ingest → tiling → SAM scan → Muse score — using the
+    fictional brief already at the top of <code>src\score_all.py</code>. Edit that brief there first
+    if you want a different one. Fictional only, never a real person or a real case.</p>
+    <button class="primary" id="runBtn" onclick="startRun()">▶ Run pipeline</button>
+    <span id="runState" class="meta"></span>
+    <div id="runlog">No run yet.</div>
+  </section>
+
+  <section>
+    <h2>2 · Map</h2>
+    <p class="meta">Grey pins: photos. Coloured pins: ranked candidates —
+    <b style="color:#1e7d32">green ≥ 0.7</b>, <b style="color:#b26a00">amber 0.4–0.7</b>,
+    <b style="color:#b3261e">red &lt; 0.4</b>. Candidates from video frames have no GPS and do not appear here.</p>
+    <div id="map"></div>
+  </section>
+
+  <section>
+    <h2>3 · Review</h2>
+    <p>Ranked by Muse score, top first. Open a card, check the crop against the score and reason,
+    then mark it <b>Accept</b> or <b>Reject</b>. Your calls are saved in
+    <code>data\output\review_decisions.json</code> and survive a restart.</p>
+    <div class="filters">
+      <button class="on" onclick="setFilter('all',this)">All</button>
+      <button onclick="setFilter('unreviewed',this)">Unreviewed</button>
+      <button onclick="setFilter('accept',this)">Accepted</button>
+      <button onclick="setFilter('reject',this)">Rejected</button>
+      &nbsp; <a href="/api/export.csv">⬇ Export accepted as CSV</a>
+      &nbsp; <a href="/api/export.geojson" target="_blank">⬇ Export accepted as GeoJSON</a>
+    </div>
+    <div id="cards"><p class="empty">Loading ranked candidates…</p></div>
+  </section>
+
+  <section>
+    <h2>4 · Review Agent</h2>
+    <p>Small, verifiable, on top of the ranked list — it proposes, you decide.
+    It dedupes the same object in overlapping tiles, re-checks borderline
+    Muse scores (0.4–0.6) with one tighter second pass, and drafts a
+    one-line-per-candidate summary with a citation to tile, crop, SAM
+    confidence and Muse score. No chat agent, no pipeline rewrite.
+    Run it after Days 3–4, then Accept / Reject in section 3 as usual.</p>
+    <button class="primary" id="agentBtn" onclick="startAgent()">▶ Run Review Agent</button>
+    <span id="agentState" class="meta"></span>
+    <pre id="agentSummary" style="white-space:pre-wrap;background:#f6f6f6;padding:12px;border-radius:8px;border:1px solid #ddd;font-size:13px">Review Agent has not run yet.</pre>
+  </section>
+</main>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+let allCards = [];
+let filter = 'all';
+let map, pollTimer = null;
+
+function scoreClass(s){
+  if (s === null || s === undefined) return '';
+  if (s >= 0.7) return 'high';
+  if (s >= 0.4) return 'mid';
+  return 'low';
+}
+function pinColor(s){
+  if (s === null || s === undefined) return 'gray';
+  if (s >= 0.7) return 'green';
+  if (s >= 0.4) return 'orange';
+  return 'red';
+}
+
+async function loadStatus(){
+  const r = await fetch('/api/status');
+  const s = await r.json();
+  document.getElementById('status').textContent =
+    `${s.photos} photo(s) in manifest (${s.photos_with_gps} with GPS) · ` +
+    `${s.tiles_scanned} tile(s) SAM-scanned · ${s.ranked_count} ranked candidate(s) · ` +
+    `${s.decisions} reviewed (${s.accepted} accepted)` +
+    (s.agent_ran ? ` · Review Agent: ${s.agent_kept} kept, ${s.agent_merged} merged, ${s.agent_rechecked} re-checked` : ' · Review Agent not run yet');
+}
+
+async function loadMap(){
+  if (!map){
+    map = L.map('map').setView([36.02, -80.38], 13);
+    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
+  }
+  const r = await fetch('/api/map');
+  const d = await r.json();
+  d.photos.forEach(p => {
+    L.marker([p.lat, p.lon]).addTo(map).bindPopup(`<b>${p.filename}</b>`);
+  });
+  d.candidates.forEach(c => {
+    const icon = L.divIcon({html:
+      `<div style="background:${pinColor(c.muse_score)};color:#fff;border-radius:50%;width:26px;height:26px;` +
+      `display:flex;align-items:center;justify-content:center;font-weight:700;border:2px solid #fff">${c.rank}</div>`,
+      className:'', iconSize:[26,26], iconAnchor:[13,13]});
+    L.marker([c.lat, c.lon], {icon}).addTo(map)
+      .bindPopup(`<b>#${c.rank} ${c.candidate}</b><br>Muse ${c.muse_score} · SAM ${c.sam_confidence}<br>${c.source_photo}`);
+  });
+  if (d.photos[0]) map.setView([d.photos[0].lat, d.photos[0].lon], 16);
+  else if (d.candidates[0]) map.setView([d.candidates[0].lat, d.candidates[0].lon], 16);
+}
+
+function renderCards(){
+  const box = document.getElementById('cards');
+  const list = allCards.filter(c =>
+    filter === 'all' || (filter === 'unreviewed' ? !c.decision : c.decision === filter));
+  if (!allCards.length){
+    box.innerHTML = `<p class="empty">No ranked candidates yet. Run Days 3–4 first
+      (<code>.venv\\Scripts\\python src\\score_all.py</code>), or hit Run above — then refresh this page.</p>`;
+    return;
+  }
+  if (!list.length){
+    box.innerHTML = `<p class="empty">Nothing in this filter.</p>`;
+    return;
+  }
+  box.innerHTML = list.map(c => `
+    <div class="card">
+      <img src="/api/crop/${c.candidate}" alt="candidate crop ${c.candidate}">
+      <div class="body">
+        <div><span class="score ${scoreClass(c.muse_score)}">#${c.rank} · Muse ${c.muse_score ?? 'unscored'}</span>
+        <span class="meta"> · SAM ${c.sam_confidence}</span></div>
+        <p><b>${c.muse_reply || 'No Muse reply recorded.'}</b></p>
+        ${c.muse_score_2 !== null && c.muse_score_2 !== undefined ? `<p><b>2nd Muse pass: ${c.muse_score_2}</b> — ${c.muse_reply_2 || ''}</p>` : ''}
+        ${c.merged_into ? `<p><b>Agent: merged duplicate — same object as ${c.merged_into}.</b> ${c.agent_note || ''} Check it before trusting the merge; the duplicate stays visible here so you can override it.</p>` : ''}
+        ${c.review_rank ? `<p class="meta">Review rank #${c.review_rank} (review score ${c.review_score})</p>` : ''}
+        <p class="meta">${c.candidate} · tile ${c.tile} · from ${c.source_photo}
+        ${c.lat !== null && c.lat !== undefined ? ` · GPS ${c.lat}, ${c.lon}` : ' · no GPS (video frame or no-GPS photo)'}</p>
+        <p>${c.decision ? `<span class="decision ${c.decision}">${c.decision === 'accept' ? '✓ Accepted' : '✕ Rejected'}</span>` : 'Not reviewed yet.'}</p>
+        <button class="accept" onclick="decide('${c.candidate}','accept')">Accept</button>
+        <button class="reject" onclick="decide('${c.candidate}','reject')">Reject</button>
+        ${c.decision ? `<button onclick="decide('${c.candidate}','clear')">Clear</button>` : ''}
+      </div>
+    </div>`).join('');
+}
+
+async function loadRanked(){
+  const r = await fetch('/api/ranked');
+  const d = await r.json();
+  allCards = d.candidates || [];
+  renderCards();
+}
+
+async function decide(name, decision){
+  await fetch('/api/decide', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({candidate: name, decision})});
+  await loadRanked(); await loadStatus();
+}
+
+function setFilter(f, btn){
+  filter = f;
+  document.querySelectorAll('.filters button').forEach(b => b.classList.remove('on'));
+  btn.classList.add('on');
+  renderCards();
+}
+
+async function startRun(){
+  const btn = document.getElementById('runBtn');
+  btn.disabled = true;
+  const r = await fetch('/api/run', {method:'POST'});
+  const d = await r.json();
+  document.getElementById('runState').textContent = d.message || d.error || '';
+  if (!d.ok){ btn.disabled = false; return; }
+  pollTimer = setInterval(pollRun, 2000);
+}
+async function pollRun(){
+  const r = await fetch('/api/run/status');
+  const s = await r.json();
+  document.getElementById('runState').textContent = `${s.step}: ${s.message}`;
+  document.getElementById('runlog').textContent = s.log || 'Starting…';
+  if (!s.running){
+    clearInterval(pollTimer);
+    document.getElementById('runBtn').disabled = false;
+    await loadStatus(); await loadRanked(); await loadMap();
+  }
+}
+
+async function loadAgent(){
+  const r = await fetch('/api/agent');
+  const a = await r.json();
+  document.getElementById('agentState').textContent = a.message || '';
+  document.getElementById('agentSummary').textContent =
+    a.summary || 'Review Agent has not run yet.';
+}
+async function startAgent(){
+  const btn = document.getElementById('agentBtn');
+  btn.disabled = true;
+  const r = await fetch('/api/agent/run', {method:'POST'});
+  const d = await r.json();
+  document.getElementById('agentState').textContent = d.message || d.error || '';
+  if (!d.ok){ btn.disabled = false; return; }
+  const timer = setInterval(async () => {
+    const s = await (await fetch('/api/agent')).json();
+    document.getElementById('agentState').textContent = s.message || '';
+    if (!s.running){
+      clearInterval(timer);
+      btn.disabled = false;
+      await loadAgent(); await loadRanked(); await loadStatus();
+    }
+  }, 2000);
+}
+
+loadStatus(); loadMap(); loadRanked(); loadAgent();
+</script>
+</body>
+</html>
