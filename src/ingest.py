@@ -33,7 +33,15 @@ def read_gps(path):
 def main():
     OUTPUT_FILE.parent.mkdir(parents=True, exist_ok=True)
     photos = []
-    for path in sorted(INPUT_DIR.glob("*.jpg")) + sorted(INPUT_DIR.glob("*.JPG")) + sorted(INPUT_DIR.glob("*.jpeg")) + sorted(INPUT_DIR.glob("*.JPEG")):
+    # Windows treats .jpg and .JPG as the same file, so the old 4-glob
+    # loop counted each photo twice (2 photos / 30 tiles for 1 photo).
+    # Glob once, dedupe by lowercased resolved path.
+    seen = set()
+    for path in sorted(INPUT_DIR.glob("*.jpg")) + sorted(INPUT_DIR.glob("*.jpeg")):
+        key = str(path.resolve()).lower()
+        if key in seen:
+            continue
+        seen.add(key)
         lat, lon, (w, h) = read_gps(path)
         photos.append({
             "filename": path.name,
