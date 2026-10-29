@@ -1,4 +1,12 @@
 # ARGUS - Days 3-4, Part 2: Muse-score the top SAM candidates (Windows)
+# RESOLUTION FIX version (Oct 28, 2026): crops candidates from the
+# ORIGINAL photo, not from the tile. The old version cropped from the
+# tile JPG (already saved at quality 75), then saved the crop as JPG
+# again - two JPEG losses. This version maps the SAM box through
+# data/output/tiles.json (tile x,y origin) to global photo coordinates
+# and crops straight from data/input/<source photo>, saving at
+# quality=95, subsampling=0. Falls back to the tile crop if the
+# original or tiles.json is missing, so it never crashes a run.
 #
 # Run AFTER Part 1 (scan_all.py) has scanned all tiles.
 #
@@ -6,7 +14,7 @@
 #   1. Reads data\output\sam_all.json (every tile's SAM boxes).
 #   2. Takes the top candidates by SAM confidence (default: top 20,
 #      confidence >= 0.80), highest first.
-#   3. Crops each candidate out of its tile and saves it as
+#   3. Crops each candidate out of its ORIGINAL photo and saves it as
 #      data\output\candidates\candidate-01.jpg, candidate-02.jpg, ...
 #   4. Sends each crop to Muse Spark (muse-spark-1.3, Standard) with
 #      the fictional case brief below, and asks for a score 0-1 plus
@@ -45,12 +53,13 @@ from PIL import Image
 
 SAM_ALL = Path("data/output/sam_all.json")
 MANIFEST = Path("data/output/manifest.json")
+TILES_JSON = Path("data/output/tiles.json")
 CAND_DIR = Path("data/output/candidates")
 OUT_JSON = Path("data/output/ranked_candidates.json")
 OUT_CSV = Path("data/output/ranked_candidates.csv")
 
 # --- EDIT THIS: fictional test case only, never a real person/case ---
-FICTIONAL_BRIEF = "black shirt, shorts, 10 year old build"
+FICTIONAL_BRIEF = "red jacket, dark pants, adult build"
 
 # How many candidates to score, and the SAM confidence floor.
 TOP_N = 20
@@ -89,6 +98,36 @@ def source_photo_for(tile_name):
     stem = Path(tile_name).stem
     match = TILE_RE.match(stem)
     return (match.group(1) + ".jpg") if match else tile_name
+
+
+def tile_origins():
+    """tile name -> (x, y) origin in the source photo, from tiles.json."""
+    if not TILES_JSON.exists():
+        return {}
+    try:
+        data = json.loads(TILES_JSON.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return {t["tile"]: (t.get("x", 0), t.get("y", 0)) for t in data.get("tiles", [])}
+
+
+def crop_from_original(tile_path, box, photo_name, origins):
+    """Return (image, global_box, source_used).
+
+    Tries the original photo first: SAM box is in tile coordinates,
+    add the tile origin to get global photo coordinates, crop from
+    data/input/<photo>. Falls back to cropping the tile itself.
+    """
+    x1, y1, x2, y2 = [int(v) for v in box]
+    origin = origins.get(tile_path.name)
+    orig_path = Path("data/input") / photo_name
+    if origin is not None and orig_path.exists():
+        ox, oy = origin
+        gx1, gy1, gx2, gy2 = x1 + ox, y1 + oy, x2 + ox, y2 + oy
+        img = Image.open(orig_path).convert("RGB")
+        return img.crop((gx1, gy1, gx2, gy2)), [gx1, gy1, gx2, gy2], "original"
+    img = Image.open(tile_path).convert("RGB")
+    return img.crop((x1, y1, x2, y2)), [x1, y1, x2, y2], "tile-fallback"
 
 
 def gps_for(manifest, photo_name):
@@ -159,19 +198,20 @@ def main():
 
     key = get_key()
     CAND_DIR.mkdir(parents=True, exist_ok=True)
+    origins = tile_origins()
 
     ranked = []
     for i, cand in enumerate(chosen, start=1):
         tile_path = Path(cand["tile_path"])
-        img = Image.open(tile_path).convert("RGB")
-        x1, y1, x2, y2 = cand["box"]
-        crop = img.crop((int(x1), int(y1), int(x2), int(y2)))
-        cand_file = CAND_DIR / f"candidate-{i:02d}.jpg"
-        crop.save(cand_file)
         photo_name = source_photo_for(tile_path.name)
+        crop, global_box, crop_source = crop_from_original(
+            tile_path, cand["box"], photo_name, origins)
+        cand_file = CAND_DIR / f"candidate-{i:02d}.jpg"
+        crop.save(cand_file, quality=95, subsampling=0)
         lat, lon = gps_for(manifest, photo_name)
         print(f"[{i}/{len(chosen)}] {tile_path.name} #{cand['object_id']} "
-              f"SAM {cand['confidence']:.2f} -> {cand_file.name} ...", flush=True)
+              f"SAM {cand['confidence']:.2f} -> {cand_file.name} "
+              f"(crop from {crop_source}) ...", flush=True)
         try:
             reply = verify_with_muse(key, cand_file)
         except Exception as exc:  # noqa: BLE001 - one bad call must not kill the run
@@ -189,6 +229,8 @@ def main():
             "lon": lon,
             "sam_object_id": cand["object_id"],
             "box": cand["box"],
+            "global_box": global_box,
+            "crop_source": crop_source,
             "sam_confidence": cand["confidence"],
             "fictional_brief": FICTIONAL_BRIEF,
             "muse_score": score,
