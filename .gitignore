@@ -1,6 +1,14 @@
+# Never commit these:
 .venv/
 .env
+__pycache__/
+*.pyc
+*.log
+
+# Your own photos, tiles, scans and decisions stay local:
 data/input/
 data/tiles/
 data/output/
-__pycache__/
+
+# sample-data/ is intentionally NOT ignored. It is the demo set
+# judges run against, and it must be in the public repo.

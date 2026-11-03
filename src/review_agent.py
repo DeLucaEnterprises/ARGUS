@@ -1,8 +1,8 @@
-# ARGUS - Day 5: Review Agent (Windows)
+# ARGUS - Review Agent (Windows)
 #
-# The small, verifiable agent layer Mark approved Oct 28, 2026.
-# It sits ON TOP of the Days 3-4 ranked list. It does NOT rebuild
-# the pipeline, does NOT pick the brief, and does NOT run a search
+# A small, verifiable agent layer that sits on top of the ranked
+# candidate list from a pipeline scan. It does NOT rebuild the
+# pipeline, does NOT pick the brief, and does NOT run a search
 # on its own. It proposes; a human approves or rejects each one.
 #
 # Three jobs only, in order:
@@ -17,20 +17,20 @@
 #      tighter prompt. The original score is kept; the second score
 #      is stored separately as muse_score_2, and the review score
 #      is the second score when it exists, the first score otherwise.
-#   3. Draft the review summary - one line per surviving candidate,
-#      each with a citation to the tile, crop, SAM confidence and
+#   3. Draft the review summary - one plain-text line per surviving
+#      candidate, each with the tile, crop, SAM confidence and
 #      Muse score(s), so a human can verify every claim in one click.
 #      Merged-away duplicates get their own line, citing why.
 #
 # What it writes (it never overwrites ranked_candidates.json):
 #   data/output/review_agent.json  - the full agent proposal
-#   data/output/review_summary.md  - the one-line-per-candidate summary
-# The Day 5 UI reads review_agent.json and shows the agent notes on
+#   data/output/review_summary.txt - the plain-text summary
+# The review UI reads review_agent.json and shows the agent notes on
 # each card. The original ranked list stays the audit trail.
 #
-# Run from the argus folder, with the venv on, AFTER Days 3-4:
+# Run from the argus folder, with the venv on, AFTER a pipeline run:
 #   .venv\Scripts\python src\review_agent.py
-# Or from the Day 5 UI: section 4, "Run Review Agent".
+# Or from the review UI: "Run Review Agent".
 # No key is needed for dedupe + summary; the second Muse pass is
 # skipped (with a warning) if .env has no Meta key yet.
 #
@@ -45,7 +45,7 @@ from pathlib import Path
 RANKED = Path("data/output/ranked_candidates.json")
 TILES = Path("data/output/tiles.json")
 OUT_JSON = Path("data/output/review_agent.json")
-OUT_MD = Path("data/output/review_summary.md")
+OUT_TXT = Path("data/output/review_summary.txt")
 
 TILE = 1024
 OVERLAP = 128
@@ -214,19 +214,20 @@ def summary_line(row):
            if row.get("lat") is not None else "no GPS")
     second = ""
     if row.get("muse_score_2") is not None:
-        second = f" -> 2nd Muse {row['muse_score_2']}"
-    return (f"- #{row.get('rank')} {row.get('candidate')} - "
-            f"Muse {row.get('muse_score')}{second} - "
-            f"SAM {row.get('sam_confidence')} - "
-            f"tile {row.get('tile')} - from {row.get('source_photo')} - "
-            f"{gps} - Muse: \"{row.get('muse_reply', '').strip()[:120]}\" "
-            f"[human decision: ___]")
+        second = f", 2nd Muse {row['muse_score_2']}"
+    muse_text = row.get('muse_reply', '').strip()[:120].rstrip('.')
+    return (f"{row.get('rank')}. {row.get('candidate')}: "
+            f"Muse {row.get('muse_score')}{second}, "
+            f"SAM {row.get('sam_confidence')}, "
+            f"tile {row.get('tile')}, from {row.get('source_photo')}, "
+            f"{gps}. Muse said: {muse_text}. "
+            f"Decision: pending human review.")
 
 
 def main():
     if not RANKED.exists():
         print("ERROR: data\\output\\ranked_candidates.json not found.")
-        print("Run Days 3-4 first: .venv\\Scripts\\python src\\score_all.py")
+        print("Run the pipeline first: .venv\\Scripts\\python src\\score_all.py")
         sys.exit(2)
     ranked = json.loads(RANKED.read_text(encoding="utf-8"))
     candidates = ranked.get("candidates", [])
@@ -289,34 +290,32 @@ def main():
 
     merged_by_name = {m["candidate"]: m for m in merged}
     lines = [
-        "# ARGUS Review Agent - summary",
+        "ARGUS Review Agent summary",
         "",
-        f"Generated {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')} - "
+        f"Generated {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}, "
         f"fictional brief: {brief!r}",
-        f"Ranked: {len(candidates)} - kept: {len(kept)} - "
-        f"merged away: {len(merged)} - borderline re-checked: {len(rechecked)}",
+        f"Ranked: {len(candidates)}, kept: {len(kept)}, "
+        f"merged away: {len(merged)}, borderline re-checked: {len(rechecked)}",
         "",
-        "Agent proposes, human decides. Nothing here is a find - "
-        "Accept / Reject each candidate in the Day 5 UI.",
+        "Agent proposes, human decides. Nothing here is a find.",
         "",
-        "## Surviving candidates (by review score)",
+        "Surviving candidates (by review score):",
         "",
     ]
     for row in kept:
-        # Show the review rank in the line, keep the original rank too.
         line_row = dict(row)
         line_row["rank"] = row.get("review_rank")
         lines.append(summary_line(line_row))
-    lines += ["", "## Merged away (duplicates - check before trusting)", ""]
+    lines += ["", "Merged away (duplicates, check before trusting):", ""]
     if merged:
         for m in merged:
-            lines.append(f"- {m['candidate']} - {m['reason']}")
+            lines.append(f"{m['candidate']}: {m['reason']}")
     else:
-        lines.append("- None. No two candidates overlapped enough to merge.")
+        lines.append("None. No two candidates overlapped enough to merge.")
     if skipped:
-        lines += ["", "## Second pass skipped", ""]
+        lines += ["", "Second pass skipped:", ""]
         for s in skipped:
-            lines.append(f"- {s['candidate']} - {s['reason']}")
+            lines.append(f"{s['candidate']}: {s['reason']}")
     lines.append("")
 
     OUT_JSON.write_text(json.dumps({
@@ -328,14 +327,14 @@ def main():
         "skipped_second_pass": skipped,
         "summary": "\n".join(lines),
     }, indent=2), encoding="utf-8")
-    OUT_MD.write_text("\n".join(lines), encoding="utf-8")
+    OUT_TXT.write_text("\n".join(lines), encoding="utf-8")
     print()
     print("Review Agent done:")
     print(f"  kept {len(kept)}, merged {len(merged)}, "
           f"re-checked {len(rechecked)}, skipped {len(skipped)}")
     print(f"Saved: {OUT_JSON}")
-    print(f"Saved: {OUT_MD}")
-    print("Open the Day 5 UI and check the agent notes on each card - "
+    print(f"Saved: {OUT_TXT}")
+    print("Open the review UI and check the agent notes on each card - "
           "then Accept / Reject as usual.")
 
 

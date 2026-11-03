@@ -59,7 +59,19 @@ OUT_JSON = Path("data/output/ranked_candidates.json")
 OUT_CSV = Path("data/output/ranked_candidates.csv")
 
 # --- EDIT THIS: fictional test case only, never a real person/case ---
-FICTIONAL_BRIEF = "red jacket, dark pants, adult build"
+# The UI brief editor (web/review.html -> /api/brief) saves to
+# data/brief.txt, and this loader makes that saved brief win over the
+# line below - so judges never have to edit code to change the brief.
+# If data/brief.txt does not exist, the line below is used as-is.
+FICTIONAL_BRIEF = "adult person, dark shirt"
+try:
+    _brief_file = Path(__file__).resolve().parent.parent / "data" / "brief.txt"
+    if _brief_file.exists():
+        _saved = _brief_file.read_text(encoding="utf-8").strip()
+        if _saved:
+            FICTIONAL_BRIEF = _saved
+except Exception:
+    pass
 
 # How many candidates to score, and the SAM confidence floor.
 TOP_N = 20

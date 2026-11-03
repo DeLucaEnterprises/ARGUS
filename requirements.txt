@@ -1,0 +1,4 @@
+Pillow
+Flask
+openai
+meta-sam-parser
